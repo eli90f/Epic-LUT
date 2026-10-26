@@ -1,0 +1,84 @@
+// Owned file-only installation of source-format Epic LUT patch triplets.
+// Uses the original writer's9ba626afa44a3aa3 archive and numeric patch layers.
+// No game process memory, injections, baseline overwrites or unowned replacements.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <tlhelp32.h>
+#include <bcrypt.h>
+#pragma comment(lib,"bcrypt.lib")
+#include "patch_install.h"
+#include "lut_io.h"
+#include "game_assets.h"
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <set>
+#include <stdexcept>
+namespace omega {namespace {
+namespace fs=std::filesystem;using Bytes=std::vector<uint8_t>;using Digest=std::array<uint8_t,32>;
+const std::wstring Base=L"9ba626afa44a3aa3";const char Magic[]="OMEGA_LUT_INSTALL\t1\n";
+void need(bool ok,const char* s){if(!ok)throw std::runtime_error(s);}
+Bytes read(const fs::path& path,size_t maximum=64*1024*1024){auto size=fs::file_size(path);need(size<=maximum,"Owned patch/state file exceeds bound");std::ifstream f(path,std::ios::binary);need(bool(f),"Cannot read patch/state file");Bytes b(static_cast<size_t>(size));if(size)f.read(reinterpret_cast<char*>(b.data()),std::streamsize(size));need(bool(f),"Cannot read complete patch/state file");return b;}
+Digest sha(const Bytes& b){BCRYPT_ALG_HANDLE a=nullptr;BCRYPT_HASH_HANDLE h=nullptr;Digest out{};need(BCryptOpenAlgorithmProvider(&a,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0,"SHA256 unavailable");NTSTATUS status=BCryptCreateHash(a,&h,nullptr,0,nullptr,0,0);if(status>=0&&!b.empty())status=BCryptHashData(h,const_cast<PUCHAR>(b.data()),ULONG(b.size()),0);if(status>=0)status=BCryptFinishHash(h,out.data(),ULONG(out.size()),0);if(h)BCryptDestroyHash(h);BCryptCloseAlgorithmProvider(a,0);need(status>=0,"SHA256 failed");return out;}
+std::string hex(const Digest& d){const char* chars="0123456789abcdef";std::string s;for(uint8_t b:d){s+=chars[b>>4];s+=chars[b&15];}return s;}
+std::wstring wide(const std::string& s){return std::wstring(s.begin(),s.end());}
+std::string ascii(const std::wstring& w){need(std::all_of(w.begin(),w.end(),[](wchar_t c){return c>=32&&c<127;}),"Non-ASCII owned filename");std::string out;for(wchar_t c:w)out.push_back(char(c));return out;}
+std::wstring canonical(const std::wstring& path){auto p=fs::canonical(fs::path(path)).wstring();need(!p.empty()&&p.find(L'\0')==std::wstring::npos,"Invalid game data folder");CharLowerBuffW(p.data(),DWORD(p.size()));return p;}
+Bytes pathBytes(const std::wstring& s){Bytes out(s.size()*sizeof(wchar_t));if(!out.empty())std::memcpy(out.data(),s.data(),out.size());return out;}
+std::atomic<uint64_t> sequence{0};
+std::wstring suffix(){return std::to_wstring(GetTickCount64())+L"_"+std::to_wstring(GetCurrentProcessId())+L"_"+std::to_wstring(++sequence);}
+bool ordinary(const fs::path& p){auto attr=GetFileAttributesW(p.c_str());return attr!=INVALID_FILE_ATTRIBUTES&&!(attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT));}
+void writeNew(const fs::path& path,const Bytes& b){HANDLE h=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);need(h!=INVALID_HANDLE_VALUE,"Cannot create owned staging file; no unowned file was overwritten");DWORD n=0;bool ok=(b.empty()||WriteFile(h,b.data(),DWORD(b.size()),&n,nullptr))&&n==b.size()&&FlushFileBuffers(h);CloseHandle(h);if(!ok){DeleteFileW(path.c_str());throw std::runtime_error("Cannot write complete owned file");}try{need(read(path)==b,"Owned file read-back mismatch");}catch(...){DeleteFileW(path.c_str());throw;}}
+void atomic(const fs::path& path,const Bytes& b){auto temp=path.wstring()+L".pending_"+suffix();writeNew(temp,b);if(!MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){DeleteFileW(temp.c_str());throw std::runtime_error("Cannot publish installation ownership manifest");}}
+void gameClosed(){HANDLE h=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);need(h!=INVALID_HANDLE_VALUE,"Cannot verify that Helldivers2 is closed");PROCESSENTRY32W e{};e.dwSize=sizeof(e);bool running=false;if(Process32FirstW(h,&e))do{if(_wcsicmp(e.szExeFile,L"helldivers2.exe")==0){running=true;break;}}while(Process32NextW(h,&e));CloseHandle(h);need(!running,"Close Helldivers2 before installing or restoring LUT patches");}
+void word(Bytes& b,uint32_t v){for(unsigned i=0;i<4;++i)b.push_back(uint8_t(v>>(8*i)));}
+void qword(Bytes& b,uint64_t v){for(unsigned i=0;i<8;++i)b.push_back(uint8_t(v>>(8*i)));}
+void text(Bytes& b,const std::string& s){need(s.size()<65536,"Ownership string too long");word(b,uint32_t(s.size()));b.insert(b.end(),s.begin(),s.end());}
+struct Cursor{const Bytes& b;size_t at=0;uint64_t num(unsigned n){need(at<=b.size()&&n<=b.size()-at,"Truncated ownership manifest");uint64_t v=0;for(unsigned i=0;i<n;++i)v|=uint64_t(b[at++])<<(8*i);return v;}std::string string(){auto n=num(4);need(n<65536&&n<=b.size()-at,"Invalid ownership string");std::string s(b.begin()+at,b.begin()+at+size_t(n));at+=size_t(n);return s;}Digest digest(){need(at<=b.size()&&32<=b.size()-at,"Truncated ownership digest");Digest d;std::copy_n(b.begin()+at,32,d.begin());at+=32;return d;}};
+struct Proof{uint64_t size=0;Digest hash{};};
+struct Entry{std::wstring stem,documentFile;std::string resource;std::array<Proof,3> proof;Digest documentHash{};};
+struct Ledger{std::wstring game;std::vector<Entry> entries;};
+struct Context{fs::path game,state,manifest;std::string key;std::wstring canonicalGame;};
+Context context(const std::wstring& game,const std::wstring& app){Context c;c.canonicalGame=canonical(game);c.game=c.canonicalGame;c.state=fs::absolute(app)/L"State";fs::create_directories(c.state);c.key=hex(sha(pathBytes(c.canonicalGame)));c.manifest=c.state/(L"lut-install_"+wide(c.key)+L".bin");return c;}
+std::array<fs::path,3> paths(const Context& c,const Entry& e){return{c.game/e.stem,c.game/(e.stem+L".gpu_resources"),c.game/(e.stem+L".stream")};}
+bool validStem(const std::wstring& stem){auto prefix=Base+L".patch_";if(stem.rfind(prefix,0)!=0)return false;auto number=stem.substr(prefix.size());if(number.empty()||number.find_first_not_of(L"0123456789")!=std::wstring::npos)return false;return number==L"0"||number[0]!=L'0';}
+bool validDoc(const std::wstring& name){return name.rfind(L"lut_",0)==0&&name.size()>9&&name.substr(name.size()-5)==L".olut"&&name.find(L"..")==std::wstring::npos&&name.find_first_not_of(L"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_.")==std::wstring::npos;}
+Bytes encode(const Ledger& l){Bytes b(Magic,Magic+sizeof(Magic)-1);auto p=pathBytes(l.game);word(b,uint32_t(p.size()));b.insert(b.end(),p.begin(),p.end());word(b,uint32_t(l.entries.size()));for(const auto& e:l.entries){text(b,ascii(e.stem));text(b,ascii(e.documentFile));text(b,e.resource);for(auto& proof:e.proof){qword(b,proof.size);b.insert(b.end(),proof.hash.begin(),proof.hash.end());}b.insert(b.end(),e.documentHash.begin(),e.documentHash.end());}auto hash=sha(b);b.insert(b.end(),hash.begin(),hash.end());return b;}
+Ledger load(const Context& c){Ledger l;l.game=c.canonicalGame;if(!fs::exists(c.manifest))return l;need(ordinary(c.manifest),"Ownership manifest is not an ordinary file");auto b=read(c.manifest,2*1024*1024);need(b.size()>sizeof(Magic)+32&&std::memcmp(b.data(),Magic,sizeof(Magic)-1)==0,"Invalid LUT ownership manifest");Digest expected;std::copy_n(b.end()-32,32,expected.begin());b.resize(b.size()-32);need(sha(b)==expected,"Ownership manifest digest mismatch");Cursor r{b,sizeof(Magic)-1};auto size=r.num(4);need(size%2==0&&size<=65536&&size<=b.size()-r.at,"Invalid ownership folder");l.game.resize(size/2);if(size)std::memcpy(l.game.data(),b.data()+r.at,size_t(size));r.at+=size_t(size);need(l.game==c.canonicalGame,"Ownership manifest belongs to a different game folder");auto count=r.num(4);need(count<=4096,"Too many owned LUT patches");std::set<std::wstring> used;for(uint64_t i=0;i<count;++i){Entry e;e.stem=wide(r.string());e.documentFile=wide(r.string());e.resource=r.string();need(validStem(e.stem)&&validDoc(e.documentFile)&&used.insert(e.stem).second,"Unsafe or duplicate owned patch filename");for(auto& p:e.proof){p.size=r.num(8);p.hash=r.digest();}e.documentHash=r.digest();l.entries.push_back(std::move(e));}need(r.at==b.size(),"Trailing ownership manifest data");return l;}
+std::vector<LutDocument> verify(const Context& c,const Ledger& l){std::vector<LutDocument> docs;for(const auto& e:l.entries){auto files=paths(c,e);for(size_t i=0;i<files.size();++i){need(ordinary(files[i]),"Owned LUT file is missing or is not an ordinary file; nothing was changed");auto b=read(files[i]);need(b.size()==e.proof[i].size&&sha(b)==e.proof[i].hash,"Owned LUT file changed externally; refusing to overwrite or delete it");}auto file=c.state/e.documentFile;need(ordinary(file)&&sha(read(file))==e.documentHash,"Owned LUT baseline metadata changed or is missing");auto doc=loadPreset(file.wstring());need(doc.resourceId==e.resource,"Owned LUT resource identity mismatch");docs.push_back(std::move(doc));}return docs;}
+bool samePixels(const std::vector<Pixel>& a,const std::vector<Pixel>& b){return a.size()==b.size()&&(a.empty()||std::memcmp(a.data(),b.data(),a.size()*sizeof(Pixel))==0);}
+void deleteMatching(const fs::path& p,const Bytes& expected){need(ordinary(p)&&read(p)==expected,"Patch file changed during transaction; refusing removal");need(DeleteFileW(p.c_str())!=0,"Cannot remove owned patch file");}
+struct SavedFile{fs::path path;Bytes data;};
+struct Transaction{const Context& c;std::vector<SavedFile> oldFiles,newFiles;std::vector<fs::path> newDocs;Bytes oldManifest;bool hadManifest=false;void rollback(){for(auto it=newFiles.rbegin();it!=newFiles.rend();++it)if(fs::exists(it->path))deleteMatching(it->path,it->data);for(auto& file:oldFiles){if(fs::exists(file.path))need(read(file.path)==file.data,"Rollback destination changed externally");else writeNew(file.path,file.data);}if(hadManifest){if(!fs::exists(c.manifest)||read(c.manifest)!=oldManifest)atomic(c.manifest,oldManifest);}else if(fs::exists(c.manifest))need(DeleteFileW(c.manifest.c_str())!=0,"Cannot remove incomplete manifest");for(auto& p:newDocs)DeleteFileW(p.c_str());}};
+uint64_t nextLayer(const Context& c){uint64_t max=0;bool found=false;for(auto& file:fs::directory_iterator(c.game)){auto name=file.path().filename().wstring();if(name.size()<=23||name.substr(16,7)!=L".patch_")continue;if(name.substr(0,16).find_first_not_of(L"0123456789abcdefABCDEF")!=std::wstring::npos)continue;auto tail=name.substr(23);if(tail.empty()||tail.find_first_not_of(L"0123456789")!=std::wstring::npos)continue;auto value=std::stoull(tail);max=found?std::max(max,value):value;found=true;}need(!found||max<0xffffffffu,"Patch layer number exceeds supported unsigned range");return found?max+1:0;}
+std::wstring runRestore(const Context& c,const Ledger& previous,const std::vector<LutDocument>& verified){(void)verified;if(previous.entries.empty())return L"No owned OMEGA LUT patches are installed for this game folder.";Transaction tx{c};tx.hadManifest=true;tx.oldManifest=read(c.manifest);try{gameClosed();clearGameAssetCache();for(auto& e:previous.entries)for(auto& p:paths(c,e)){auto bytes=read(p);tx.oldFiles.push_back({p,bytes});deleteMatching(p,bytes);}need(DeleteFileW(c.manifest.c_str())!=0,"Cannot clear installation manifest");}catch(...){try{tx.rollback();}catch(const std::exception& e){throw std::runtime_error(std::string("Restore failed and rollback needs attention: ")+e.what());}throw;}for(auto& e:previous.entries)DeleteFileW((c.state/e.documentFile).c_str());return L"Restored: removed "+std::to_wstring(previous.entries.size())+L" owned LUT patch triplet(s). Original game archives were unchanged.";}
+} // private
+std::vector<LutDocument> loadInstalledLutPatches(const std::wstring& gameData,const std::wstring& appFolder){auto c=context(gameData,appFolder);auto ledger=load(c);return verify(c,ledger);}
+std::wstring restoreLutPatch(const std::wstring& gameData,const std::wstring& appFolder){gameClosed();auto c=context(gameData,appFolder);auto previous=load(c);auto docs=verify(c,previous);return runRestore(c,previous,docs);}
+std::wstring installLutPatch(const LutDocument& doc,const std::wstring& game,const std::wstring& app){return installLutPatches({doc},game,app);}
+std::wstring installLutPatches(const std::vector<LutDocument>& input,const std::wstring& gameData,const std::wstring& appFolder){
+ gameClosed();need(!input.empty()&&input.size()<=4096,"Choose at least one staged LUT to install");auto c=context(gameData,appFolder);auto previous=load(c);auto owned=verify(c,previous);std::set<std::string> ids;for(auto& d:input)need(ids.insert(d.resourceId).second,"The staged set contains duplicate LUT resource IDs");Transaction tx{c};tx.hadManifest=fs::exists(c.manifest);if(tx.hadManifest)tx.oldManifest=read(c.manifest);auto staging=c.state/(L"install_pending_"+suffix());need(CreateDirectoryW(staging.c_str(),nullptr)!=0,"Cannot create install staging directory");std::vector<fs::path> exportedFolders;
+ try{
+  // All old owned files were fingerprinted before the first mutation.
+  clearGameAssetCache();
+  for(auto& e:previous.entries)for(auto& p:paths(c,e)){auto bytes=read(p);tx.oldFiles.push_back({p,bytes});deleteMatching(p,bytes);}
+  auto current=scanGameLuts(c.game.wstring());need(gameAssetScanStats().baseArchiveAvailable,"Current base archive9ba626afa44a3aa3 is missing or invalid");std::vector<LutDocument> planned;planned.reserve(input.size());
+  for(const auto& source:input){auto found=std::find_if(current.begin(),current.end(),[&](const auto& r){return r.resourceId==source.resourceId;});need(found!=current.end(),"A staged resource ID is absent from current game data");auto base=loadGameLut(*found);bool matches=source.nativeHeader==base.nativeHeader&&source.archiveId==base.archiveId&&samePixels(source.original,base.pixels);
+   if(!matches){for(size_t i=0;i<owned.size();++i)if(owned[i].resourceId==source.resourceId){const auto& old=owned[i];auto dds=encodeDDS(old);std::vector<uint8_t> hdr(old.nativeHeader.begin(),old.nativeHeader.begin()+4);hdr.resize(192,0);hdr[8]=hdr[9]=hdr[10]=hdr[11]=255;hdr.insert(hdr.end(),dds.begin(),dds.begin()+148);bool ownSource=source.archiveId=="9ba626afa44a3aa3"&&source.nativeHeader==hdr&&samePixels(source.original,old.pixels);matches=ownSource&&old.nativeHeader==base.nativeHeader&&old.archiveId==base.archiveId&&samePixels(old.original,base.pixels);break;}}
+   need(matches,"Current source metadata or original LUT pixels changed. Rescan and reload the target before installing");need(source.width==base.width,"Staged LUT columns differ from the verified current target");base.pixels=source.pixels;base.width=source.width;base.height=source.height;base.label=source.label;planned.push_back(std::move(base));
+  }
+  auto slot=nextLayer(c);Ledger next;next.game=c.canonicalGame;auto token=suffix();
+  for(size_t i=0;i<planned.size();++i){auto folder=staging/(L"lut_"+std::to_wstring(i));exportPatch(planned[i],folder.wstring());exportedFolders.push_back(folder);Entry entry;entry.resource=planned[i].resourceId;entry.documentFile=L"lut_"+wide(c.key.substr(0,16))+L"_"+token+L"_"+std::to_wstring(i)+L".olut";auto docPath=c.state/entry.documentFile;need(!fs::exists(docPath),"Ownership sidecar collision");savePreset(planned[i],docPath.wstring());tx.newDocs.push_back(docPath);entry.documentHash=sha(read(docPath));
+   for(;;++slot){need(slot<=0xffffffffu,"No supported patch layer remains");entry.stem=Base+L".patch_"+std::to_wstring(slot);auto files=paths(c,entry);if(std::none_of(files.begin(),files.end(),[](const auto& p){return fs::exists(p);}))break;}
+   auto files=paths(c,entry);std::array<fs::path,3> staged={folder/(Base+L".patch_0"),folder/(Base+L".patch_0.gpu_resources"),folder/(Base+L".patch_0.stream")};gameClosed();for(size_t part=0;part<3;++part){auto bytes=read(staged[part]);writeNew(files[part],bytes);tx.newFiles.push_back({files[part],bytes});entry.proof[part]={bytes.size(),sha(bytes)};}next.entries.push_back(std::move(entry));++slot;
+  }
+  verify(c,next);atomic(c.manifest,encode(next));
+ }catch(...){try{tx.rollback();}catch(const std::exception& e){throw std::runtime_error(std::string("Install failed and rollback needs attention: ")+e.what());}for(auto& folder:exportedFolders){for(auto& file:fs::directory_iterator(folder))DeleteFileW(file.path().c_str());RemoveDirectoryW(folder.c_str());}RemoveDirectoryW(staging.c_str());throw;}
+ for(auto& e:previous.entries)DeleteFileW((c.state/e.documentFile).c_str());for(auto& folder:exportedFolders){for(auto& file:fs::directory_iterator(folder))DeleteFileW(file.path().c_str());RemoveDirectoryW(folder.c_str());}RemoveDirectoryW(staging.c_str());return L"Installation finished: "+std::to_wstring(input.size())+L" LUT patch triplet(s) installed. Start the game to test.";
+}
+} // omega

@@ -1,0 +1,22 @@
+#include "preview_cache.h"
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <cstring>
+#include <cmath>
+#include <stdexcept>
+namespace omega {namespace {
+namespace fs=std::filesystem;using B=std::vector<uint8_t>;
+uint64_t hash(const void*p,size_t n){uint64_t h=1469598103934665603ULL;auto b=(const uint8_t*)p;for(size_t i=0;i<n;i++){h^=b[i];h*=1099511628211ULL;}return h;}
+fs::path path(const std::wstring&key){wchar_t exe[32768];auto n=GetModuleFileNameW(nullptr,exe,32768);if(!n||n>=32768)throw std::runtime_error("Cannot locate EXE cache directory");std::wostringstream name;name<<std::hex<<std::setw(16)<<std::setfill(L'0')<<hash(key.data(),key.size()*sizeof(wchar_t));return fs::path(exe).parent_path()/L"lut-editor-cache"/(name.str()+L".meshcache");}
+void put(B&b,const void*p,size_t n){auto v=(const uint8_t*)p;b.insert(b.end(),v,v+n);}template<class T>void put(B&b,const T&x){put(b,&x,sizeof(x));}
+void str(B&b,const std::wstring&s){put(b,uint32_t(s.size()));put(b,s.data(),s.size()*sizeof(wchar_t));}
+void str(B&b,const std::string&s){put(b,uint32_t(s.size()));put(b,s.data(),s.size());}
+struct Reader{const B&b;size_t at=0;void take(void*p,size_t n){if(at>b.size()||n>b.size()-at)throw std::runtime_error("Truncated preview cache");memcpy(p,b.data()+at,n);at+=n;}template<class T>T get(){T x;take(&x,sizeof(x));return x;}std::wstring wide(){auto n=get<uint32_t>();if(n>32768)throw std::runtime_error("Invalid cache text");std::wstring s(n,0);take(s.data(),n*sizeof(wchar_t));return s;}std::string narrow(){auto n=get<uint32_t>();if(n>32768)throw std::runtime_error("Invalid cache ID");std::string s(n,0);take(s.data(),n);return s;}};
+}
+bool readPreviewCache(const std::wstring& key,ItemPreviewModel& model){try{auto file=path(key);if(!fs::exists(file))return false;auto size=fs::file_size(file);if(size<24||size>1024ULL*1024*1024)return false;std::ifstream f(file,std::ios::binary);B b(size);f.read((char*)b.data(),size);if(!f)return false;Reader r{b};if(r.get<uint64_t>()!=0x3345484341434c4fULL)return false;auto expected=r.get<uint64_t>();if(hash(b.data()+16,b.size()-16)!=expected)return false;if(r.wide()!=key)return false;ItemPreviewModel m;m.identity=r.get<uint64_t>();m.sourceMeshes=r.get<uint64_t>();m.name=r.wide();m.notice=r.wide();auto np=r.get<uint32_t>();if(np>16384)return false;for(uint32_t i=0;i<np;i++){ItemPreviewPart part;part.name=r.wide();part.lutResourceId=r.narrow();part.materialKey=r.get<uint32_t>();m.parts.push_back(part);}auto nv=r.get<uint32_t>(),nt=r.get<uint32_t>();if(nv>10000000||nt>10000000)return false;if(uint64_t(nv)*sizeof(ItemPreviewVertex)+uint64_t(nt)*sizeof(ItemPreviewTriangle)!=b.size()-r.at)return false;m.vertices.resize(nv);m.triangles.resize(nt);r.take(m.vertices.data(),nv*sizeof(ItemPreviewVertex));r.take(m.triangles.data(),nt*sizeof(ItemPreviewTriangle));for(auto&v:m.vertices)if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z)||!std::isfinite(v.nx)||!std::isfinite(v.ny)||!std::isfinite(v.nz))return false;for(auto&t:m.triangles)if(t.a>=nv||t.b>=nv||t.c>=nv||t.part>=np)return false;model=std::move(m);return true;}catch(...){return false;}}
+void writePreviewCache(const std::wstring& key,const ItemPreviewModel&m){try{auto file=path(key);fs::create_directories(file.parent_path());B b;put(b,uint64_t(0x3345484341434c4fULL));put(b,uint64_t(0));str(b,key);put(b,m.identity);put(b,uint64_t(m.sourceMeshes));str(b,m.name);str(b,m.notice);put(b,uint32_t(m.parts.size()));for(auto&p:m.parts){str(b,p.name);str(b,p.lutResourceId);put(b,p.materialKey);}put(b,uint32_t(m.vertices.size()));put(b,uint32_t(m.triangles.size()));put(b,m.vertices.data(),m.vertices.size()*sizeof(ItemPreviewVertex));put(b,m.triangles.data(),m.triangles.size()*sizeof(ItemPreviewTriangle));auto sum=hash(b.data()+16,b.size()-16);memcpy(b.data()+8,&sum,8);auto tmp=file;tmp+=L".tmp";{std::ofstream f(tmp,std::ios::binary|std::ios::trunc);f.write((char*)b.data(),b.size());if(!f)return;}MoveFileExW(tmp.c_str(),file.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+ std::ofstream note(file.parent_path()/L"README.txt");note<<"OMEGA LUT editor decoded-geometry cache. Owned by this editor, not Helldivers.\nKeyed by decoder version, unit, LUT and game archive path/size/modification signature.\nChecksum/bounds-checked on load. Missing/corrupt/stale entries regenerate.\nNo game shader-cache files are read or changed. Full original shader is not cached.\n";
+ }catch(...){/* Cache failure must not prevent the preview from working. */}}
+}

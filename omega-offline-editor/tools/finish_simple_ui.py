@@ -1,0 +1,12 @@
+from pathlib import Path
+p=Path(r'D:\GPT\OMEGA-EPIC-LUT-EDITOR\native\main.cpp');s=p.read_text(encoding='utf-8-sig')
+s=s.replace('if(choices[i]>=doc.width)continue;', 'if(choices[i]>=doc.width||(doc.width==3&&i>0))continue;')
+s=s.replace('if(!imported.empty())selectImported(0);layout();', 'if(!imported.empty())selectImported(0);for(const auto& d:imported)if(!d.archiveId.empty()&&d.changed())staged[d.resourceId]=d;layout();')
+s=s.replace('auto shared=name.find(L" | ");', 'auto unit=name.find(L" / Unit ");if(unit!=std::wstring::npos)name.resize(unit);auto shared=name.find(L" | ");')
+s=s.replace('if(!advanced){const size_t choices[]=', 'if(!advanced){if(doc.width==3)col=0;const size_t choices[]=')
+s=s.replace('L"FILE-BASED MATERIAL LAB  •  FULL RGBA VALUES  •  NO GAME MEMORY ACCESS"', 'advanced?L"ADVANCED  /  Exact LUT values and DDS tools":L"Choose an item  >  Change its appearance  >  Install"')
+s=s.replace('EndPaint(h,&ps);return 0;', '''size_t pending=staged.size();bool listed=staged.count(doc.resourceId)!=0;if(!doc.resourceId.empty()&&!doc.archiveId.empty()){if(doc.changed()&&!listed)pending++;if(!doc.changed()&&listed)pending--;}text(dc,270,835,1090,23,std::to_wstring(pending)+L" texture edits staged · edits stay when switching items",RGB(164,174,191));EndPaint(h,&ps);return 0;''')
+p.write_text(s,encoding='utf-8-sig')
+p=Path(r'D:\GPT\OMEGA-EPIC-LUT-EDITOR\tools\build.cmd');s=p.read_text().replace('material_preview.cpp ..', 'material_preview.cpp patch_install.cpp ..').replace('R5.9.3.2.exe','R5.9.3.3.exe');p.write_text(s)
+p=Path(r'D:\GPT\OMEGA-EPIC-LUT-EDITOR\native\omega.rc');s=p.read_text().replace('5,9,3,2','5,9,3,3').replace('5.9.3.2','5.9.3.3').replace('Offline Test 2','Offline Test 3');p.write_text(s)
+p=Path(r'D:\GPT\OMEGA-EPIC-LUT-EDITOR\native\main.cpp');s=p.read_text(encoding='utf-8-sig').replace('R5.9.3.2 · OFFLINE','R5.9.3.3 · OFFLINE').replace('Offline Test 2','Offline Test 3');p.write_text(s,encoding='utf-8-sig')

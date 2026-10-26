@@ -1,0 +1,9 @@
+build/
+dist/
+Logs/
+State/
+Exports/
+lut-editor-cache/
+__pycache__/
+*.obj
+*.pdb

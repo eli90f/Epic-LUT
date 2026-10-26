@@ -1,1 +1,4 @@
 * text=auto eol=lf
+# Preserve exact bytes of the published OMEGA source and release artifacts.
+omega-offline-editor/** -text
+artifacts/omega-offline/** -text
